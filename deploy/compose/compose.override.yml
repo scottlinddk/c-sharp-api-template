@@ -1,0 +1,36 @@
+# Local development overrides. Picked up automatically by `docker compose` in this folder.
+# Do NOT copy this file to servers.
+#   cp .env.example .env && docker compose up --build
+#   docker compose run --rm --build migrate
+# Swagger UI: http://localhost:5080/swagger
+
+services:
+  caddy:
+    profiles: [edge]   # not needed locally; the API is exposed directly below
+
+  api:
+    build:
+      context: ../..
+      dockerfile: src/Template.Api/Dockerfile
+      target: api
+    image: template-api:local
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      OpenApi__Enabled: "true"
+    ports:
+      - "127.0.0.1:5080:8080"
+
+  migrate:
+    build:
+      context: ../..
+      dockerfile: src/Template.Api/Dockerfile
+      target: migrator
+    image: template-migrator:local
+
+  postgres:
+    ports:
+      - "127.0.0.1:5432:5432"
+
+networks:
+  backend:
+    internal: false   # allow the host port mapping for local tools
