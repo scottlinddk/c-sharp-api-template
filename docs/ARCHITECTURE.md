@@ -150,9 +150,9 @@ Rename `Template` to the product name when the template is used.
 | Concern | Choice |
 |---|---|
 | Errors | RFC 9457 ProblemDetails everywhere, via `IExceptionHandler` + `Result<T>` mapping. No exceptions for expected failures |
-| Validation | FluentValidation in Application, run by an endpoint filter |
-| API docs | Built-in `Microsoft.AspNetCore.OpenApi` (Swashbuckle is no longer in the templates) + Scalar UI in non-prod |
-| Versioning | URL segment `/v1/...` via `Asp.Versioning.Http`. Simple and cache-friendly |
+| Validation | FluentValidation validators in Application, invoked by the handler, which returns a validation `Error`. Keeps use cases testable without HTTP |
+| API docs | Built-in `Microsoft.AspNetCore.OpenApi` generates the document. **Swagger UI** (`Swashbuckle.AspNetCore.SwaggerUI`, UI only) renders it at `/swagger`. Gated by `OpenApi:Enabled`. Strict JSON number handling keeps numbers typed as `number` for generated clients |
+| Versioning | URL segment `/api/v1/...` as a route group. Add `Asp.Versioning.Http` only when a second version is needed |
 | Auth | JWT bearer from an external IdP. Do not build our own user store |
 | Rate limiting | Built-in `Microsoft.AspNetCore.RateLimiting`, per user/IP partition |
 | CORS | Explicit allow-list of frontend origins per environment |
