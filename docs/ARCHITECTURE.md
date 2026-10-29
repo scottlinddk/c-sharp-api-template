@@ -200,7 +200,19 @@ Stage 2  runtime  mcr.microsoft.com/dotnet/aspnet:10.0-noble-chiseled
 | Filesystem | `read_only: true` with a `tmpfs` for `/tmp`. Uploads go to Object Storage, never to the container disk |
 | Logs | JSON to stdout. **Configure Docker log rotation** (`json-file` with `max-size`/`max-file`), or logs will eventually fill the server disk |
 | Restart policy | `restart: unless-stopped` |
+| Config file watching | Set `DOTNET_HOSTBUILDER__RELOADCONFIGONCHANGE=false`. Config comes from env vars, so file watching is useless in a container and can hit the Linux inotify limit (`System.IO.IOException: ... inotify instances`), per Microsoft's Docker hosting guide |
 | Time zone | UTC in the container. Convert at the edges (frontend or explicit API fields) |
+
+### Deliberately avoided
+
+Common in beginner tutorials (e.g. Hetzner's [Creating a Docker image and container](https://community.hetzner.com/tutorials/howto-docker-container/)), but wrong for production:
+
+| Practice | Why not | Instead |
+|---|---|---|
+| `docker commit` to make an image from a running container | Not reproducible, no history, unknown contents | Every image is built from the Dockerfile in CI |
+| Unpinned base images (`FROM ubuntu`, `:latest`) | A rebuild silently changes the OS and runtime | Pin `aspnet:10.0-noble-chiseled` and let Renovate bump the digest |
+| `docker run` by hand on the server | Config lives only in shell history | Everything declared in `compose.yml`, deployed by the pipeline |
+| `docker exec -it ... sh` for debugging | Not possible in chiseled images, and changes are lost anyway | Logs, traces and metrics (section 10). Use `dotnet-dump`/`dotnet-trace` via a sidecar container if needed |
 
 ### Images and registry
 
@@ -320,6 +332,8 @@ Because the database is self-managed, this section is non-negotiable.
 ## 11. Security checklist
 
 - [ ] SSH keys only, root login disabled, fail2ban or SSH behind VPN
+- [ ] **Do not rely on UFW/iptables on the host.** Docker writes its own iptables rules, and published ports bypass UFW. Use the Hetzner Cloud Firewall (outside the VM) as the real perimeter, and publish only Caddy's 80/443. Bind any other published port to `127.0.0.1`
+- [ ] Treat membership of the `docker` group as root access. Only the deploy user is in it, and it has no password login
 - [ ] Cloud Firewall default deny, DB port closed publicly
 - [ ] TLS everywhere (Caddy auto certs or LB managed certs), HSTS
 - [ ] Containers run as non-root, read-only filesystem where possible
@@ -361,7 +375,19 @@ Observability on Grafana Cloud free tier: €0 until limits are reached.
 
 ---
 
-## 15. Suggested next steps
+## 15. References
+
+- Microsoft: [Host ASP.NET Core in Docker containers (.NET 10)](https://learn.microsoft.com/en-us/aspnet/core/host-and-deploy/docker/?view=aspnetcore-10.0). The `aspnetcore-12.0` view of the same page is for a future version, so use the 10.0 view for this plan
+- Microsoft: [Configure ASP.NET Core to work with proxy servers and load balancers](https://learn.microsoft.com/en-us/aspnet/core/host-and-deploy/proxy-load-balancer?view=aspnetcore-10.0) (forwarded headers, section 4)
+- Microsoft: [GC using Docker and small containers](https://learn.microsoft.com/en-us/aspnet/core/performance/memory?view=aspnetcore-10.0#gc-using-docker-and-small-containers)
+- GitHub: [dotnet/dotnet-docker samples](https://github.com/dotnet/dotnet-docker/tree/main/samples), the reference Dockerfiles including chiseled images
+- Hetzner: [Docker CE app](https://docs.hetzner.com/cloud/apps/list/docker-ce/) (section 6)
+- Hetzner Community: [Creating a Docker image and container](https://community.hetzner.com/tutorials/howto-docker-container/) (basics, see "Deliberately avoided" in section 4)
+- Hetzner Community: [Run multiple Docker Compose services as systemd services](https://community.hetzner.com/tutorials/docker-compose-as-systemd-service) and [IPv6 on Docker securely](https://community.hetzner.com/tutorials/docker-ipv6-securely), worth reading before writing `cloud-init.yaml`
+
+---
+
+## 16. Suggested next steps
 
 1. Agree on the open questions above and record them as ADRs in `docs/adr/`.
 2. Scaffold the solution skeleton and one sample feature (`Orders`) end to end.
