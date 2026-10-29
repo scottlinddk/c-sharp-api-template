@@ -1,0 +1,412 @@
+# Architecture Plan: C# API on Hetzner
+
+Status: **Draft v0.1** (proposal, no code yet)
+Target: .NET 10 (current LTS, supported until Nov 2028) on Hetzner Cloud, EU region.
+
+---
+
+## 1. Goals and constraints
+
+| Goal | What it means in practice |
+|---|---|
+| Low, predictable cost | Hetzner Cloud VMs, no hyperscaler managed services |
+| EU data residency (GDPR) | Falkenstein (FSN1), Nuremberg (NBG1) or Helsinki (HEL1). Sign Hetzner's DPA |
+| Reusable template | Clean layering, conventions and CI that new APIs can copy |
+| Simple ops for a small team | Docker Compose first, Kubernetes only if a real need appears |
+| Good frontend DX | OpenAPI spec that generates a typed TS client for React + TanStack Query |
+
+**Key constraint:** Hetzner offers compute, networking, volumes, load balancers and S3-compatible Object Storage, but **no managed database, queue or secrets service**. Everything stateful is ours to run, back up and patch. This is the main trade-off of choosing Hetzner and is addressed in sections 6 and 9.
+
+---
+
+## 2. High-level topology
+
+### Phase 1: single node (MVP, ~€10-20/month)
+
+```
+Internet
+   │  443
+   ▼
+Hetzner Cloud Firewall (80/443 open, 22 from admin IPs/VPN only)
+   │
+   ▼
+┌───────────────── VM (CAX21 ARM or CX32 x86) ─────────────────┐
+│  Docker Compose                                              │
+│   ┌────────┐     ┌──────────┐     ┌─────────────┐            │
+│   │ Caddy  │ ──▶ │ api (x2) │ ──▶ │ PostgreSQL  │            │
+│   │ TLS    │     │ .NET 10  │     │ + volume    │            │
+│   └────────┘     └──────────┘     └─────────────┘            │
+│                        │                 │                   │
+│                  OTel collector     pgBackRest/WAL-G         │
+└────────────────────────┼─────────────────┼───────────────────┘
+                         ▼                 ▼
+               Grafana Cloud (free)   Hetzner Object Storage (backups)
+```
+
+### Phase 2: split tiers (when load or uptime needs grow)
+
+```
+Hetzner Load Balancer (TLS, health checks)
+   ├── app-1 (VM, Compose)  ┐
+   └── app-2 (VM, Compose)  ┘── private network 10.0.0.0/16
+                               └── db-1 (dedicated VM, Hetzner Volume, no public IP)
+```
+
+**Why not Kubernetes from day one?** k3s on Hetzner is viable, but it adds a control plane, ingress, storage drivers and upgrades to own. For one or a few APIs, Compose plus a load balancer covers zero-downtime deploys and horizontal scaling at a fraction of the complexity. Revisit if we pass ~5 services or need autoscaling.
+
+**ARM (CAX) vs x86 (CX/CPX):** .NET runs well on linux-arm64 and CAX is cheaper per vCPU. The cost is a multi-arch Docker build and making sure every native dependency has an arm64 build. Recommendation: ARM, unless a dependency blocks it.
+
+---
+
+## 3. Application architecture
+
+### Style: Clean Architecture with vertical feature slices
+
+- **Layers** keep dependencies pointing inward (Api → Application → Domain; Infrastructure implements Application interfaces).
+- **Feature folders** inside each layer keep a feature's endpoint, handler, validator and DTOs together, so changes stay local.
+- **Minimal APIs** with endpoint groups (`MapGroup`) instead of controllers. Less ceremony, better AOT/trimming support, first-class in .NET 10.
+- **No MediatR by default.** Plain handler classes registered in DI are enough and avoid a licensing question (MediatR went commercial in 2025). Add a pipeline library only if cross-cutting behaviors grow.
+
+### Proposed file tree
+
+```
+c-sharp-api-template/
+├── .github/
+│   └── workflows/
+│       ├── ci.yml                    # build, test, lint, image build on PR
+│       └── deploy.yml                # push image to GHCR, deploy on main/tag
+├── deploy/
+│   ├── compose/
+│   │   ├── compose.yml               # api, migrate, caddy, postgres, otel-collector
+│   │   ├── compose.override.yml      # local dev overrides
+│   │   └── Caddyfile
+│   ├── infra/                        # OpenTofu (Terraform) for Hetzner
+│   │   ├── main.tf                   # servers, network, firewall, LB
+│   │   ├── variables.tf
+│   │   ├── outputs.tf
+│   │   └── cloud-init.yaml           # docker, users, ssh hardening, unattended-upgrades
+│   └── scripts/
+│       ├── deploy.sh                 # pull image, migrate, rolling restart
+│       └── restore-db.sh             # documented and tested restore
+├── docs/
+│   ├── ARCHITECTURE.md               # this file
+│   └── adr/                          # architecture decision records
+│       └── 0001-hosting-on-hetzner.md
+├── src/
+│   ├── Template.Api/                 # HTTP edge: composition root only
+│   │   ├── Program.cs
+│   │   ├── Endpoints/
+│   │   │   └── Orders/
+│   │   │       └── OrderEndpoints.cs # MapGroup("/orders") + route handlers
+│   │   ├── Infrastructure/           # Api-only concerns
+│   │   │   ├── ExceptionHandling/    # IExceptionHandler → ProblemDetails
+│   │   │   ├── Auth/                 # JWT bearer setup, policies
+│   │   │   ├── RateLimiting/
+│   │   │   └── OpenApi/              # doc transformers, Scalar UI
+│   │   ├── appsettings.json
+│   │   └── Dockerfile                # built with repo root as context (section 4)
+│   ├── Template.Application/         # use cases, no HTTP or EF types
+│   │   ├── Abstractions/             # IAppDbContext, IClock, ICurrentUser
+│   │   ├── Common/                   # Result<T>, errors, paging
+│   │   └── Orders/
+│   │       ├── CreateOrder/
+│   │       │   ├── CreateOrderCommand.cs
+│   │       │   ├── CreateOrderHandler.cs
+│   │       │   └── CreateOrderValidator.cs   # FluentValidation
+│   │       └── GetOrder/
+│   │           ├── GetOrderQuery.cs
+│   │           ├── GetOrderHandler.cs
+│   │           └── OrderResponse.cs
+│   ├── Template.Domain/              # entities, value objects, domain rules
+│   │   ├── Common/                   # Entity, IAuditable, DomainEvent
+│   │   └── Orders/
+│   │       ├── Order.cs
+│   │       └── OrderStatus.cs
+│   └── Template.Infrastructure/      # EF Core, external services
+│       ├── Persistence/
+│       │   ├── AppDbContext.cs
+│       │   ├── Configurations/       # IEntityTypeConfiguration<T> per entity
+│       │   └── Migrations/
+│       ├── Services/                 # e.g. email, blob storage (S3 client)
+│       └── DependencyInjection.cs    # AddInfrastructure(...)
+├── tests/
+│   ├── Template.Domain.Tests/        # pure unit tests
+│   ├── Template.Application.Tests/   # handler tests with fakes
+│   ├── Template.Api.IntegrationTests/# WebApplicationFactory + Testcontainers Postgres
+│   └── Template.ArchitectureTests/   # NetArchTest: enforce layer rules
+├── Directory.Build.props             # nullable, warnings as errors, analyzers
+├── Directory.Packages.props          # central package versions
+├── global.json                       # pin .NET SDK
+├── .dockerignore
+├── .editorconfig
+├── Template.slnx                     # new XML solution format (.NET 9+)
+└── README.md
+```
+
+Rename `Template` to the product name when the template is used.
+
+### Cross-cutting conventions
+
+| Concern | Choice |
+|---|---|
+| Errors | RFC 9457 ProblemDetails everywhere, via `IExceptionHandler` + `Result<T>` mapping. No exceptions for expected failures |
+| Validation | FluentValidation validators in Application, invoked by the handler, which returns a validation `Error`. Keeps use cases testable without HTTP |
+| API docs | Built-in `Microsoft.AspNetCore.OpenApi` generates the document. **Swagger UI** (`Swashbuckle.AspNetCore.SwaggerUI`, UI only) renders it at `/swagger`. Gated by `OpenApi:Enabled`. Strict JSON number handling keeps numbers typed as `number` for generated clients |
+| Versioning | URL segment `/api/v1/...` as a route group. Add `Asp.Versioning.Http` only when a second version is needed |
+| Auth | JWT bearer from an external IdP. Do not build our own user store |
+| Rate limiting | Built-in `Microsoft.AspNetCore.RateLimiting`, per user/IP partition |
+| CORS | Explicit allow-list of frontend origins per environment |
+| Config | `appsettings.json` + environment variables. Options pattern with `ValidateOnStart()` |
+| Time | Inject `TimeProvider`, never `DateTime.UtcNow` directly |
+| Logging | Serilog or built-in logging, structured JSON to stdout, exported via OpenTelemetry |
+| Health | `/health/live` (process up) and `/health/ready` (DB reachable). Used by Caddy/LB |
+
+---
+
+## 4. Container design
+
+The API ships as one Docker image. The same image runs locally, in CI integration tests, in staging and in production. Only configuration (environment variables) differs.
+
+### Dockerfile (multi-stage)
+
+```
+Stage 1  build    mcr.microsoft.com/dotnet/sdk:10.0
+                  ├─ copy *.csproj, Directory.*.props, global.json → dotnet restore   (cached layer)
+                  ├─ copy src → dotnet publish -c Release --no-restore
+                  └─ (optional) build EF migration bundle as a second output
+Stage 2  runtime  mcr.microsoft.com/dotnet/aspnet:10.0-noble-chiseled
+                  ├─ copy published output only
+                  ├─ runs as non-root user `app` (built into .NET 8+ images)
+                  └─ listens on 8080 (default ASPNETCORE_HTTP_PORTS)
+```
+
+- **Build context is the repo root**, so `Directory.Build.props`, `Directory.Packages.props` and `global.json` are visible. Dockerfile lives at `src/Template.Api/Dockerfile` and is built with `docker build -f src/Template.Api/Dockerfile .`.
+- **`.dockerignore`** excludes `bin/`, `obj/`, `.git/`, `tests/` and local secrets. It keeps the context small and avoids leaking files into layers.
+- **Chiseled image:** Ubuntu-based, no shell, no package manager, non-root. Smaller and with fewer CVEs. Trade-off: no `curl`, so no shell-based `HEALTHCHECK` and no `docker exec -it sh` for debugging. Health is checked from outside instead (see below). If the team wants an in-container shell for debugging, use the regular `aspnet:10.0` image and accept the larger attack surface.
+- **Alternative:** `dotnet publish /t:PublishContainer` builds an image without a Dockerfile. Less control over layers and the migration bundle, so a Dockerfile is recommended for this template.
+- **Multi-arch:** `docker buildx --platform linux/amd64,linux/arm64`, so the same tag runs on ARM (CAX) servers and x86 laptops/CI.
+
+### Runtime behaviour
+
+| Concern | Decision |
+|---|---|
+| Port | 8080 inside the container, never published to the host. Only Caddy (Phase 1) or the LB-facing port (Phase 2) is exposed |
+| TLS | Terminated at Caddy or the Hetzner LB. The API speaks plain HTTP on the internal Docker network |
+| Forwarded headers | `UseForwardedHeaders` trusting only the proxy's network, so client IP and scheme are correct for rate limiting and redirects |
+| Config | Environment variables only, e.g. `ConnectionStrings__Default`, `Auth__Authority`. No secrets in `appsettings.*.json` or image layers |
+| Health checks | Caddy active health checks (`health_uri /health/ready`) and LB health checks in Phase 2. Deploy script polls the same endpoint |
+| Graceful shutdown | .NET handles SIGTERM. Set `HostOptions.ShutdownTimeout` (e.g. 25 s) and Compose `stop_grace_period: 30s`, so in-flight requests finish during rolling restarts |
+| Resource limits | Compose `mem_limit` / `cpus` per container. .NET's GC respects cgroup limits, and DATAS (default for Server GC since .NET 9) keeps memory use proportional to load |
+| Filesystem | `read_only: true` with a `tmpfs` for `/tmp`. Uploads go to Object Storage, never to the container disk |
+| Logs | JSON to stdout. **Configure Docker log rotation** (`json-file` with `max-size`/`max-file`), or logs will eventually fill the server disk |
+| Restart policy | `restart: unless-stopped` |
+| Config file watching | Set `DOTNET_HOSTBUILDER__RELOADCONFIGONCHANGE=false`. Config comes from env vars, so file watching is useless in a container and can hit the Linux inotify limit (`System.IO.IOException: ... inotify instances`), per Microsoft's Docker hosting guide |
+| Time zone | UTC in the container. Convert at the edges (frontend or explicit API fields) |
+
+### Deliberately avoided
+
+Common in beginner tutorials (e.g. Hetzner's [Creating a Docker image and container](https://community.hetzner.com/tutorials/howto-docker-container/)), but wrong for production:
+
+| Practice | Why not | Instead |
+|---|---|---|
+| `docker commit` to make an image from a running container | Not reproducible, no history, unknown contents | Every image is built from the Dockerfile in CI |
+| Unpinned base images (`FROM ubuntu`, `:latest`) | A rebuild silently changes the OS and runtime | Pin `aspnet:10.0-noble-chiseled` and let Renovate bump the digest |
+| `docker run` by hand on the server | Config lives only in shell history | Everything declared in `compose.yml`, deployed by the pipeline |
+| `docker exec -it ... sh` for debugging | Not possible in chiseled images, and changes are lost anyway | Logs, traces and metrics (section 10). Use `dotnet-dump`/`dotnet-trace` via a sidecar container if needed |
+
+### Images and registry
+
+- Registry: **GitHub Container Registry (GHCR)**. Free for this use, and access is tied to repo permissions.
+- Tags: immutable `:<git-sha>` for deploys, plus `:<semver>` on releases. Never deploy `:latest`.
+- OCI labels (`org.opencontainers.image.source`, `revision`) so an image can be traced back to its commit.
+- CI scans images with **Trivy** (fail on high/critical with a fix available) and produces an SBOM.
+- Renovate/Dependabot bumps the `sdk` and `aspnet` base image digests, so security patches arrive as PRs.
+
+### Migrations as a one-off container
+
+The EF Core migration bundle runs as a short-lived container before the new API version starts:
+
+```
+docker compose run --rm migrate      # exits 0 on success, deploy stops on non-zero
+docker compose up -d --no-deps api   # then rolling restart
+```
+
+This keeps migration rights (DDL) separate from the API's runtime DB user, which only needs read/write on tables.
+
+### Local development
+
+`compose.override.yml` adds Postgres, the OTel collector and optionally a local IdP, and maps the API to `localhost:5000`. Developers can still run the API with `dotnet run`/hot reload against the Compose Postgres. Both paths must work.
+
+---
+
+## 5. Data layer
+
+- **PostgreSQL 17/18** with **EF Core 10 + Npgsql**.
+- Migrations run as a **separate step in the deploy pipeline** (EF migration bundle), not on app startup. Startup migrations race when running two replicas.
+- Use `IDbContextFactory` or scoped contexts. Enable connection pooling (Npgsql default) and set sane `Max Pool Size`.
+- Write migrations to be **backwards compatible for one release** (expand/contract), so rolling deploys never break the old instance still running.
+
+---
+
+## 6. Hetzner infrastructure
+
+| Resource | Use |
+|---|---|
+| Cloud Server (CAX/CX) | App and DB hosts |
+| Cloud Firewall | Allow 80/443 public. SSH only from admin IPs or via Tailscale/WireGuard. DB port never public |
+| Private Network | App ↔ DB traffic (Phase 2) |
+| Volume | Postgres data dir, so the DB survives server rebuilds |
+| Load Balancer (LB11) | Phase 2: TLS termination, health checks, two app nodes |
+| Primary IP | Stable public IP for DNS in Phase 1 |
+| Object Storage | S3-compatible bucket for DB backups and app file uploads |
+| Snapshots/Backups | Server-level, nice to have. **Not** a DB backup strategy (crash-consistent only) |
+
+**Provisioning:** OpenTofu with the `hetznercloud/hcloud` provider. State stored in Hetzner Object Storage (S3 backend). `cloud-init` installs Docker, creates a non-root deploy user, disables password SSH and enables `unattended-upgrades`.
+
+**Base image: plain `ubuntu-24.04` + cloud-init (recommended) vs Hetzner's `docker-ce` app image.**
+Hetzner's [Docker CE app](https://docs.hetzner.com/cloud/apps/list/docker-ce/) is Ubuntu 24.04 with Docker and the Compose plugin preinstalled, selectable as `image = "docker-ce"` in OpenTofu. It is a valid shortcut, but:
+
+- It only removes the Docker install step. SSH hardening, deploy user, firewall rules, `unattended-upgrades` and log rotation still need cloud-init.
+- The Docker version is whatever was baked into the image. The first boot should still run a package upgrade.
+- ARM (CAX) support is not stated on the docs page. Verify with `hcloud image list --type app` before relying on it.
+- A cloud-init that installs Docker from Docker's own apt repo works unchanged on any architecture, any Ubuntu image and any provider, which suits a reusable template.
+
+Decision: start from `ubuntu-24.04` and install Docker in cloud-init. Switching to `docker-ce` later is a one-line change.
+
+**Process supervision: Docker restart policies, no custom systemd units.**
+The Hetzner tutorial above wraps each Compose project in a `docker-compose@.service` systemd template and auto-updates images with Watchtower plus a cron job. Not adopted, because:
+
+- Docker's own systemd service is enabled at boot, and `restart: unless-stopped` brings the containers back. A second supervisor adds little.
+- It uses the legacy `docker-compose` v1 binary, which is end of life. We use the `docker compose` plugin.
+- **Watchtower conflicts with the deploy pipeline.** It would swap images without running migrations first, without rolling restarts, and without a known commit SHA in production. Updates must only arrive through CI.
+
+Revisit a small systemd unit only if we need strict start ordering with non-Docker services on the host.
+
+**IPv6.**
+Hetzner Cloud servers get a free IPv6 /64, while IPv4 is a paid Primary IP. Decisions:
+
+- Keep a public IPv4 for Phase 1 (many clients and corporate networks are still IPv4-only) and add an AAAA record for IPv6.
+- Only Caddy (or the LB in Phase 2) is reachable on either protocol. Containers do **not** get public IPv6 addresses, and IPv6 stays off inside Docker networks. That avoids the routing setup in the Hetzner IPv6 tutorial, which targets Proxmox + pfSense on dedicated servers.
+- **Cloud Firewall rules must list both `0.0.0.0/0` and `::/0`.** A rule written only for IPv4 leaves IPv6 unfiltered or blocked by mistake.
+
+**DNS:** Hetzner DNS or Cloudflare. Cloudflare in front (proxied) adds DDoS protection and WAF, at the cost of another vendor and seeing traffic. Hetzner already includes basic DDoS protection.
+
+---
+
+## 7. CI/CD
+
+```
+PR  ──▶ ci.yml: restore → build (warnings as errors) → unit + integration tests
+                → dotnet format --verify-no-changes → docker buildx (amd64+arm64)
+
+main ─▶ deploy.yml: build & push ghcr.io/<org>/<api>:<sha>
+                  → ssh deploy@host ./deploy.sh <sha>
+                        - docker compose pull
+                        - docker compose run --rm migrate   (DB is private, so migrations run on the host)
+                        - restart replica 1, wait for /health/ready
+                        - restart replica 2, wait for /health/ready
+                  → smoke test public /health/ready
+```
+
+- Images are tagged by commit SHA. Rollback = redeploy the previous SHA.
+- Use GitHub Environments (`staging`, `production`) with required reviewers on production.
+- Image build follows section 4 (multi-stage, chiseled, non-root). Health is verified by the deploy script and Caddy/LB, not a Docker `HEALTHCHECK`.
+
+---
+
+## 8. Secrets
+
+Hetzner has no secrets manager, so:
+
+1. **Source of truth:** GitHub Environment secrets (or 1Password/Bitwarden Secrets Manager if the org already uses one).
+2. **On the host:** the deploy job writes a `.env` file owned by the deploy user, mode `600`. Compose injects it as environment variables.
+3. Never bake secrets into images or commit them. Consider **SOPS + age** if we want encrypted secrets in Git.
+
+---
+
+## 9. Backups and recovery
+
+Because the database is self-managed, this section is non-negotiable.
+
+- **pgBackRest or WAL-G** shipping base backups + WAL to Hetzner Object Storage. Gives point-in-time recovery.
+- Retention: e.g. 7 daily, 4 weekly, 3 monthly.
+- Store backups in a **different Hetzner location** from the DB (e.g. DB in FSN1, bucket in HEL1).
+- **Monthly automated restore test** into a throwaway server. An untested backup is not a backup.
+- Targets to agree on: **RPO** (max data loss) ≤ 5 min, **RTO** (time to restore) ≤ 1 hour.
+
+---
+
+## 10. Observability
+
+- **OpenTelemetry** SDK in the API (traces, metrics, logs) → OTel Collector container → **Grafana Cloud** free tier (Tempo/Prometheus/Loki).
+  Alternative: self-host Grafana + Prometheus + Loki on a small VM. Cheaper at scale, more to maintain.
+- Uptime check from outside Hetzner (Grafana synthetic, UptimeRobot or Better Stack) hitting `/health/ready`.
+- Alerts: 5xx rate, p95 latency, DB connections, disk usage on the DB volume, backup job failures.
+
+---
+
+## 11. Security checklist
+
+- [ ] SSH keys only, root login disabled, fail2ban or SSH behind VPN
+- [ ] **Do not rely on UFW/iptables on the host.** Docker writes its own iptables rules, and published ports bypass UFW. Use the Hetzner Cloud Firewall (outside the VM) as the real perimeter, and publish only Caddy's 80/443. Bind any other published port to `127.0.0.1`
+- [ ] Treat membership of the `docker` group as root access. Only the deploy user is in it, and it has no password login
+- [ ] Cloud Firewall default deny, DB port closed publicly
+- [ ] TLS everywhere (Caddy auto certs or LB managed certs), HSTS
+- [ ] Containers run as non-root, read-only filesystem where possible
+- [ ] Dependabot/Renovate for NuGet, Docker base images and GitHub Actions
+- [ ] `dotnet list package --vulnerable` in CI
+- [ ] Rate limiting and request size limits on public endpoints
+- [ ] Security headers (Caddy or middleware)
+- [ ] Hetzner DPA signed, data processing documented for GDPR
+
+---
+
+## 12. Frontend integration (React + TanStack Query)
+
+- API publishes `/openapi/v1.json`.
+- Frontend generates a typed client with **orval** or **openapi-typescript** + `openapi-fetch`. Orval can emit TanStack Query v5 hooks directly.
+- Optional CI check: fail the PR if the committed OpenAPI spec drifts from the generated one, so breaking changes are visible in review.
+
+---
+
+## 13. Rough cost (verify on hetzner.com, prices changed in 2025)
+
+| Phase | Items | Approx. monthly |
+|---|---|---|
+| 1 | 1× CAX21, 1× Volume 20 GB, Object Storage base, Primary IP | ~€10-20 |
+| 2 | 2× app VMs, 1× DB VM, Volume, LB11, Object Storage | ~€40-70 |
+
+Observability on Grafana Cloud free tier: €0 until limits are reached.
+
+---
+
+## 14. Open questions (please challenge these)
+
+1. **What does the API do, and what load do we expect?** Requests/sec and data size decide whether Phase 1 is enough for a long time.
+2. **Is self-managing Postgres acceptable?** If nobody wants to own backups, patching and failover, a managed EU Postgres (e.g. Scaleway, Aiven, Neon EU) next to Hetzner compute is a valid hybrid. Expect a few ms of extra latency and egress cost.
+3. **Which identity provider?** Entra ID (if the org is Microsoft-based), Auth0/Clerk, or self-hosted Keycloak/Zitadel (another stateful service to run).
+4. **Uptime target?** A single VM means planned downtime during host maintenance. 99.9% realistically needs Phase 2 plus a Postgres replica.
+5. **Background jobs?** If yes, decide between `BackgroundService` + Postgres-backed queue (simple) or Hangfire/Quartz. Avoid adding Redis/RabbitMQ until needed.
+6. **Is this a template for many APIs or one product?** A template justifies more structure (architecture tests, `dotnet new` template packaging). One product could start leaner, e.g. a single project with feature folders.
+
+---
+
+## 15. References
+
+- Microsoft: [Host ASP.NET Core in Docker containers (.NET 10)](https://learn.microsoft.com/en-us/aspnet/core/host-and-deploy/docker/?view=aspnetcore-10.0). The `aspnetcore-12.0` view of the same page is for a future version, so use the 10.0 view for this plan
+- Microsoft: [Configure ASP.NET Core to work with proxy servers and load balancers](https://learn.microsoft.com/en-us/aspnet/core/host-and-deploy/proxy-load-balancer?view=aspnetcore-10.0) (forwarded headers, section 4)
+- Microsoft: [GC using Docker and small containers](https://learn.microsoft.com/en-us/aspnet/core/performance/memory?view=aspnetcore-10.0#gc-using-docker-and-small-containers)
+- GitHub: [dotnet/dotnet-docker samples](https://github.com/dotnet/dotnet-docker/tree/main/samples), the reference Dockerfiles including chiseled images
+- Hetzner: [Docker CE app](https://docs.hetzner.com/cloud/apps/list/docker-ce/) (section 6)
+- Hetzner Community: [Creating a Docker image and container](https://community.hetzner.com/tutorials/howto-docker-container/) (basics, see "Deliberately avoided" in section 4)
+- Hetzner Community: [Run multiple Docker Compose services on Debian/Ubuntu](https://community.hetzner.com/tutorials/docker-compose-as-systemd-service) (2019). Reviewed, mostly not adopted: see "Process supervision" in section 6
+- Hetzner Community: [IPv6 on Docker securely](https://community.hetzner.com/tutorials/docker-ipv6-securely) (2019). Targets Proxmox + pfSense on a dedicated server, so it does not apply to Hetzner Cloud. Only its "out-of-band firewall" principle is adopted: see "IPv6" in section 6
+
+---
+
+## 16. Suggested next steps
+
+1. Agree on the open questions above and record them as ADRs in `docs/adr/`.
+2. Scaffold the solution skeleton and one sample feature (`Orders`) end to end.
+3. Add CI (build + tests + image) before any deployment work.
+4. Provision Phase 1 with OpenTofu, deploy, and run the first restore test.
