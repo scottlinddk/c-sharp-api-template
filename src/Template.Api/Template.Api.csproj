@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <RootNamespace>Template.Api</RootNamespace>
+    <!-- XML comments on endpoints become summaries/descriptions in the OpenAPI document. -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- CS1573: injected services and CancellationToken are intentionally undocumented. -->
+    <NoWarn>$(NoWarn);CS1591;CS1573</NoWarn>
+    <ContainerRepository>template-api</ContainerRepository>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
+    <PackageReference Include="Swashbuckle.AspNetCore.SwaggerUI" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Template.Application\Template.Application.csproj" />
+    <ProjectReference Include="..\Template.Infrastructure\Template.Infrastructure.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Template.Api.IntegrationTests" />
+  </ItemGroup>
+</Project>

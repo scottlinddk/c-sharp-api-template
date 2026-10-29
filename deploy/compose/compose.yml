@@ -1,0 +1,96 @@
+# Production stack for one Hetzner server (Phase 1). See docs/ARCHITECTURE.md.
+# Usage on the server:  docker compose --env-file .env up -d
+# Migrations:           docker compose --env-file .env run --rm migrate
+
+name: template
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  caddy:
+    image: caddy:2.10
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      API_DOMAIN: ${API_DOMAIN:?set API_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+    networks: [edge]
+    logging: *logging
+
+  api:
+    image: ${API_IMAGE:-ghcr.io/scottlinddk/template-api}:${API_TAG:?set API_TAG}
+    restart: unless-stopped
+    environment:
+      ConnectionStrings__Default: ${API_CONNECTION_STRING:?set API_CONNECTION_STRING}
+      OpenApi__Enabled: ${OPENAPI_ENABLED:-false}
+      ForwardedHeaders__KnownNetworks__0: 172.30.0.0/24
+      Cors__AllowedOrigins__0: ${CORS_ORIGIN:-}
+    read_only: true
+    tmpfs:
+      - /tmp
+    mem_limit: 512m
+    cpus: 1.0
+    stop_grace_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [edge, backend]
+    logging: *logging
+
+  migrate:
+    image: ${MIGRATOR_IMAGE:-ghcr.io/scottlinddk/template-migrator}:${API_TAG:?set API_TAG}
+    profiles: [tools]
+    environment:
+      ConnectionStrings__Default: ${MIGRATIONS_CONNECTION_STRING:?set MIGRATIONS_CONNECTION_STRING}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [backend]
+    logging: *logging
+
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-template}
+      POSTGRES_USER: ${POSTGRES_USER:-template_owner}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD}
+    volumes:
+      # PostgreSQL 18 images expect the mount at /var/lib/postgresql (not .../data).
+      - pgdata:/var/lib/postgresql
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    shm_size: 256m
+    networks: [backend]
+    logging: *logging
+
+networks:
+  # Fixed subnet so the API can trust X-Forwarded-* only from Caddy's network.
+  edge:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+  backend:
+    internal: true
+
+volumes:
+  caddy_data:
+  caddy_config:
+  pgdata:

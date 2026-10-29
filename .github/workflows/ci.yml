@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+
+      - name: Restore
+        run: dotnet restore Template.slnx
+
+      - name: Format check
+        run: dotnet format Template.slnx --verify-no-changes --no-restore
+
+      - name: Build
+        run: dotnet build Template.slnx -c Release --no-restore
+
+      - name: Test (integration tests use Testcontainers + Docker)
+        run: dotnet test --solution Template.slnx -c Release --no-build
+
+      - name: Vulnerable packages
+        run: |
+          dotnet list Template.slnx package --vulnerable --include-transitive 2>&1 | tee vuln.txt
+          ! grep -q "has the following vulnerable packages" vuln.txt
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: build-test
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build API image
+        run: docker build -f src/Template.Api/Dockerfile --target api -t template-api:ci .
+      - name: Build migrator image
+        run: docker build -f src/Template.Api/Dockerfile --target migrator -t template-migrator:ci .
