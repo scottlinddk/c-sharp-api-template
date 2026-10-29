@@ -251,6 +251,16 @@ This keeps migration rights (DDL) separate from the API's runtime DB user, which
 
 **Provisioning:** OpenTofu with the `hetznercloud/hcloud` provider. State stored in Hetzner Object Storage (S3 backend). `cloud-init` installs Docker, creates a non-root deploy user, disables password SSH and enables `unattended-upgrades`.
 
+**Base image: plain `ubuntu-24.04` + cloud-init (recommended) vs Hetzner's `docker-ce` app image.**
+Hetzner's [Docker CE app](https://docs.hetzner.com/cloud/apps/list/docker-ce/) is Ubuntu 24.04 with Docker and the Compose plugin preinstalled, selectable as `image = "docker-ce"` in OpenTofu. It is a valid shortcut, but:
+
+- It only removes the Docker install step. SSH hardening, deploy user, firewall rules, `unattended-upgrades` and log rotation still need cloud-init.
+- The Docker version is whatever was baked into the image. The first boot should still run a package upgrade.
+- ARM (CAX) support is not stated on the docs page. Verify with `hcloud image list --type app` before relying on it.
+- A cloud-init that installs Docker from Docker's own apt repo works unchanged on any architecture, any Ubuntu image and any provider, which suits a reusable template.
+
+Decision: start from `ubuntu-24.04` and install Docker in cloud-init. Switching to `docker-ce` later is a one-line change.
+
 **DNS:** Hetzner DNS or Cloudflare. Cloudflare in front (proxied) adds DDoS protection and WAF, at the cost of another vendor and seeing traffic. Hetzner already includes basic DDoS protection.
 
 ---
