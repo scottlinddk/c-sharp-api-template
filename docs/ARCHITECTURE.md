@@ -273,6 +273,22 @@ Hetzner's [Docker CE app](https://docs.hetzner.com/cloud/apps/list/docker-ce/) i
 
 Decision: start from `ubuntu-24.04` and install Docker in cloud-init. Switching to `docker-ce` later is a one-line change.
 
+**Process supervision: Docker restart policies, no custom systemd units.**
+The Hetzner tutorial above wraps each Compose project in a `docker-compose@.service` systemd template and auto-updates images with Watchtower plus a cron job. Not adopted, because:
+
+- Docker's own systemd service is enabled at boot, and `restart: unless-stopped` brings the containers back. A second supervisor adds little.
+- It uses the legacy `docker-compose` v1 binary, which is end of life. We use the `docker compose` plugin.
+- **Watchtower conflicts with the deploy pipeline.** It would swap images without running migrations first, without rolling restarts, and without a known commit SHA in production. Updates must only arrive through CI.
+
+Revisit a small systemd unit only if we need strict start ordering with non-Docker services on the host.
+
+**IPv6.**
+Hetzner Cloud servers get a free IPv6 /64, while IPv4 is a paid Primary IP. Decisions:
+
+- Keep a public IPv4 for Phase 1 (many clients and corporate networks are still IPv4-only) and add an AAAA record for IPv6.
+- Only Caddy (or the LB in Phase 2) is reachable on either protocol. Containers do **not** get public IPv6 addresses, and IPv6 stays off inside Docker networks. That avoids the routing setup in the Hetzner IPv6 tutorial, which targets Proxmox + pfSense on dedicated servers.
+- **Cloud Firewall rules must list both `0.0.0.0/0` and `::/0`.** A rule written only for IPv4 leaves IPv6 unfiltered or blocked by mistake.
+
 **DNS:** Hetzner DNS or Cloudflare. Cloudflare in front (proxied) adds DDoS protection and WAF, at the cost of another vendor and seeing traffic. Hetzner already includes basic DDoS protection.
 
 ---
@@ -383,7 +399,8 @@ Observability on Grafana Cloud free tier: €0 until limits are reached.
 - GitHub: [dotnet/dotnet-docker samples](https://github.com/dotnet/dotnet-docker/tree/main/samples), the reference Dockerfiles including chiseled images
 - Hetzner: [Docker CE app](https://docs.hetzner.com/cloud/apps/list/docker-ce/) (section 6)
 - Hetzner Community: [Creating a Docker image and container](https://community.hetzner.com/tutorials/howto-docker-container/) (basics, see "Deliberately avoided" in section 4)
-- Hetzner Community: [Run multiple Docker Compose services as systemd services](https://community.hetzner.com/tutorials/docker-compose-as-systemd-service) and [IPv6 on Docker securely](https://community.hetzner.com/tutorials/docker-ipv6-securely), worth reading before writing `cloud-init.yaml`
+- Hetzner Community: [Run multiple Docker Compose services on Debian/Ubuntu](https://community.hetzner.com/tutorials/docker-compose-as-systemd-service) (2019). Reviewed, mostly not adopted: see "Process supervision" in section 6
+- Hetzner Community: [IPv6 on Docker securely](https://community.hetzner.com/tutorials/docker-ipv6-securely) (2019). Targets Proxmox + pfSense on a dedicated server, so it does not apply to Hetzner Cloud. Only its "out-of-band firewall" principle is adopted: see "IPv6" in section 6
 
 ---
 
