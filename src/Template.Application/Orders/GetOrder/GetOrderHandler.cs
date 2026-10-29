@@ -4,13 +4,17 @@ using Template.Application.Common;
 
 namespace Template.Application.Orders.GetOrder;
 
-public sealed class GetOrderHandler(IAppDbContext db)
+/// <summary>
+/// Returns the order only if the caller created it. Other users get "not found" rather than
+/// "forbidden", so ids of other users' orders cannot be probed.
+/// </summary>
+public sealed class GetOrderHandler(IAppDbContext db, ICurrentUser currentUser)
 {
     public async Task<Result<OrderResponse>> HandleAsync(GetOrderQuery query, CancellationToken cancellationToken)
     {
         var order = await db.Orders
             .AsNoTracking()
-            .Where(o => o.Id == query.Id)
+            .Where(o => o.Id == query.Id && o.CreatedBy == currentUser.UserId)
             .Select(o => new OrderResponse(o.Id, o.CustomerName, o.TotalAmount, o.Status, o.CreatedAt))
             .FirstOrDefaultAsync(cancellationToken);
 

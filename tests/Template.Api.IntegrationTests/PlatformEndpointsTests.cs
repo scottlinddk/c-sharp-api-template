@@ -29,6 +29,12 @@ public sealed class PlatformEndpointsTests(ApiFactory factory)
         Assert.True(paths.TryGetProperty("/api/v1/orders/{id}", out _));
         Assert.False(paths.TryGetProperty("/health/ready", out _));
         Assert.Equal("Template API", doc.RootElement.GetProperty("info").GetProperty("title").GetString());
+
+        // Bearer scheme for Swagger's Authorize button, required on protected operations.
+        Assert.True(doc.RootElement.GetProperty("components").GetProperty("securitySchemes").TryGetProperty("Bearer", out _));
+        var getOrder = paths.GetProperty("/api/v1/orders/{id}").GetProperty("get");
+        Assert.True(getOrder.TryGetProperty("security", out _));
+        Assert.True(getOrder.GetProperty("responses").TryGetProperty("401", out _));
     }
 
     [Fact]

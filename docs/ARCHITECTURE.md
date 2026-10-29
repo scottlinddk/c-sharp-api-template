@@ -153,7 +153,7 @@ Rename `Template` to the product name when the template is used.
 | Validation | FluentValidation validators in Application, invoked by the handler, which returns a validation `Error`. Keeps use cases testable without HTTP |
 | API docs | Built-in `Microsoft.AspNetCore.OpenApi` generates the document. **Swagger UI** (`Swashbuckle.AspNetCore.SwaggerUI`, UI only) renders it at `/swagger`. Gated by `OpenApi:Enabled`. Strict JSON number handling keeps numbers typed as `number` for generated clients |
 | Versioning | URL segment `/api/v1/...` as a route group. Add `Asp.Versioning.Http` only when a second version is needed |
-| Auth | JWT bearer from an external IdP. Do not build our own user store |
+| Auth | **Clerk** session tokens validated with the built-in JWT bearer handler (OIDC discovery, RS256, issuer, 5 s skew, `azp` allow-list, reject `sts=pending`). Authenticated by default via a fallback policy. `ICurrentUser` exposes the Clerk user/org id to use cases. No own user store |
 | Rate limiting | Built-in `Microsoft.AspNetCore.RateLimiting`, per user/IP partition |
 | CORS | Explicit allow-list of frontend origins per environment |
 | Config | `appsettings.json` + environment variables. Options pattern with `ValidateOnStart()` |
@@ -358,6 +358,7 @@ Because the database is self-managed, this section is non-negotiable.
 - [ ] Rate limiting and request size limits on public endpoints
 - [ ] Security headers (Caddy or middleware)
 - [ ] Hetzner DPA signed, data processing documented for GDPR
+- [ ] Clerk DPA accepted. Clerk is a US company: user identities (emails, names, sessions) are processed outside the EU even though the API and database are in Hetzner's EU locations. Document the transfer basis (Clerk's DPA/SCCs) and keep personal data in the API's own database to the minimum (store the Clerk user id, not copies of profile data)
 
 ---
 
@@ -384,7 +385,7 @@ Observability on Grafana Cloud free tier: €0 until limits are reached.
 
 1. **What does the API do, and what load do we expect?** Requests/sec and data size decide whether Phase 1 is enough for a long time.
 2. **Is self-managing Postgres acceptable?** If nobody wants to own backups, patching and failover, a managed EU Postgres (e.g. Scaleway, Aiven, Neon EU) next to Hetzner compute is a valid hybrid. Expect a few ms of extra latency and egress cost.
-3. **Which identity provider?** Entra ID (if the org is Microsoft-based), Auth0/Clerk, or self-hosted Keycloak/Zitadel (another stateful service to run).
+3. ~~**Which identity provider?**~~ **Decided: Clerk.** Trade-off accepted: identity data lives with a US provider (see the security checklist).
 4. **Uptime target?** A single VM means planned downtime during host maintenance. 99.9% realistically needs Phase 2 plus a Postgres replica.
 5. **Background jobs?** If yes, decide between `BackgroundService` + Postgres-backed queue (simple) or Hangfire/Quartz. Avoid adding Redis/RabbitMQ until needed.
 6. **Is this a template for many APIs or one product?** A template justifies more structure (architecture tests, `dotnet new` template packaging). One product could start leaner, e.g. a single project with feature folders.

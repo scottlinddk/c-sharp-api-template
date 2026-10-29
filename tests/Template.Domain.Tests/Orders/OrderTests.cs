@@ -9,13 +9,14 @@ public sealed class OrderTests
     [Fact]
     public void Create_ValidInput_ReturnsPendingOrder()
     {
-        var order = Order.Create("  Acme A/S ", 125.50m, Now);
+        var order = Order.Create("  Acme A/S ", 125.50m, "user_123", Now);
 
         Assert.NotEqual(Guid.Empty, order.Id);
         Assert.Equal("Acme A/S", order.CustomerName);
         Assert.Equal(125.50m, order.TotalAmount);
         Assert.Equal(OrderStatus.Pending, order.Status);
         Assert.Equal(Now, order.CreatedAt);
+        Assert.Equal("user_123", order.CreatedBy);
     }
 
     [Theory]
@@ -23,7 +24,7 @@ public sealed class OrderTests
     [InlineData(-1)]
     public void Create_NonPositiveAmount_Throws(decimal amount)
     {
-        Assert.Throws<ArgumentOutOfRangeException>(() => Order.Create("Acme", amount, Now));
+        Assert.Throws<ArgumentOutOfRangeException>(() => Order.Create("Acme", amount, "user_123", Now));
     }
 
     [Theory]
@@ -31,7 +32,7 @@ public sealed class OrderTests
     [InlineData("   ")]
     public void Create_BlankCustomerName_Throws(string name)
     {
-        Assert.Throws<ArgumentException>(() => Order.Create(name, 10m, Now));
+        Assert.Throws<ArgumentException>(() => Order.Create(name, 10m, "user_123", Now));
     }
 
     [Fact]
@@ -39,6 +40,14 @@ public sealed class OrderTests
     {
         var name = new string('x', Order.CustomerNameMaxLength + 1);
 
-        Assert.Throws<ArgumentOutOfRangeException>(() => Order.Create(name, 10m, Now));
+        Assert.Throws<ArgumentOutOfRangeException>(() => Order.Create(name, 10m, "user_123", Now));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("  ")]
+    public void Create_BlankCreatedBy_Throws(string createdBy)
+    {
+        Assert.Throws<ArgumentException>(() => Order.Create("Acme", 10m, createdBy, Now));
     }
 }

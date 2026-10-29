@@ -8,6 +8,7 @@ namespace Template.Application.Orders.CreateOrder;
 public sealed class CreateOrderHandler(
     IAppDbContext db,
     IValidator<CreateOrderCommand> validator,
+    ICurrentUser currentUser,
     TimeProvider timeProvider)
 {
     public async Task<Result<OrderResponse>> HandleAsync(CreateOrderCommand command, CancellationToken cancellationToken)
@@ -18,7 +19,7 @@ public sealed class CreateOrderHandler(
             return Error.Validation(validation.ToDictionary());
         }
 
-        var order = Order.Create(command.CustomerName, command.TotalAmount, timeProvider.GetUtcNow());
+        var order = Order.Create(command.CustomerName, command.TotalAmount, currentUser.UserId, timeProvider.GetUtcNow());
 
         db.Orders.Add(order);
         await db.SaveChangesAsync(cancellationToken);
