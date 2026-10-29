@@ -15,7 +15,7 @@ Target: .NET 10 (current LTS, supported until Nov 2028) on Hetzner Cloud, EU reg
 | Simple ops for a small team | Docker Compose first, Kubernetes only if a real need appears |
 | Good frontend DX | OpenAPI spec that generates a typed TS client for React + TanStack Query |
 
-**Key constraint:** Hetzner offers compute, networking, volumes, load balancers and S3-compatible Object Storage, but **no managed database, queue or secrets service**. Everything stateful is ours to run, back up and patch. This is the main trade-off of choosing Hetzner and is addressed in sections 5 and 8.
+**Key constraint:** Hetzner offers compute, networking, volumes, load balancers and S3-compatible Object Storage, but **no managed database, queue or secrets service**. Everything stateful is ours to run, back up and patch. This is the main trade-off of choosing Hetzner and is addressed in sections 6 and 9.
 
 ---
 
@@ -77,7 +77,7 @@ c-sharp-api-template/
 │       └── deploy.yml                # push image to GHCR, deploy on main/tag
 ├── deploy/
 │   ├── compose/
-│   │   ├── compose.yml               # api, caddy, postgres, otel-collector
+│   │   ├── compose.yml               # api, migrate, caddy, postgres, otel-collector
 │   │   ├── compose.override.yml      # local dev overrides
 │   │   └── Caddyfile
 │   ├── infra/                        # OpenTofu (Terraform) for Hetzner
@@ -104,7 +104,7 @@ c-sharp-api-template/
 │   │   │   ├── RateLimiting/
 │   │   │   └── OpenApi/              # doc transformers, Scalar UI
 │   │   ├── appsettings.json
-│   │   └── Dockerfile
+│   │   └── Dockerfile                # built with repo root as context (section 4)
 │   ├── Template.Application/         # use cases, no HTTP or EF types
 │   │   ├── Abstractions/             # IAppDbContext, IClock, ICurrentUser
 │   │   ├── Common/                   # Result<T>, errors, paging
@@ -137,6 +137,7 @@ c-sharp-api-template/
 ├── Directory.Build.props             # nullable, warnings as errors, analyzers
 ├── Directory.Packages.props          # central package versions
 ├── global.json                       # pin .NET SDK
+├── .dockerignore
 ├── .editorconfig
 ├── Template.slnx                     # new XML solution format (.NET 9+)
 └── README.md
@@ -162,7 +163,71 @@ Rename `Template` to the product name when the template is used.
 
 ---
 
-## 4. Data layer
+## 4. Container design
+
+The API ships as one Docker image. The same image runs locally, in CI integration tests, in staging and in production. Only configuration (environment variables) differs.
+
+### Dockerfile (multi-stage)
+
+```
+Stage 1  build    mcr.microsoft.com/dotnet/sdk:10.0
+                  ├─ copy *.csproj, Directory.*.props, global.json → dotnet restore   (cached layer)
+                  ├─ copy src → dotnet publish -c Release --no-restore
+                  └─ (optional) build EF migration bundle as a second output
+Stage 2  runtime  mcr.microsoft.com/dotnet/aspnet:10.0-noble-chiseled
+                  ├─ copy published output only
+                  ├─ runs as non-root user `app` (built into .NET 8+ images)
+                  └─ listens on 8080 (default ASPNETCORE_HTTP_PORTS)
+```
+
+- **Build context is the repo root**, so `Directory.Build.props`, `Directory.Packages.props` and `global.json` are visible. Dockerfile lives at `src/Template.Api/Dockerfile` and is built with `docker build -f src/Template.Api/Dockerfile .`.
+- **`.dockerignore`** excludes `bin/`, `obj/`, `.git/`, `tests/` and local secrets. It keeps the context small and avoids leaking files into layers.
+- **Chiseled image:** Ubuntu-based, no shell, no package manager, non-root. Smaller and with fewer CVEs. Trade-off: no `curl`, so no shell-based `HEALTHCHECK` and no `docker exec -it sh` for debugging. Health is checked from outside instead (see below). If the team wants an in-container shell for debugging, use the regular `aspnet:10.0` image and accept the larger attack surface.
+- **Alternative:** `dotnet publish /t:PublishContainer` builds an image without a Dockerfile. Less control over layers and the migration bundle, so a Dockerfile is recommended for this template.
+- **Multi-arch:** `docker buildx --platform linux/amd64,linux/arm64`, so the same tag runs on ARM (CAX) servers and x86 laptops/CI.
+
+### Runtime behaviour
+
+| Concern | Decision |
+|---|---|
+| Port | 8080 inside the container, never published to the host. Only Caddy (Phase 1) or the LB-facing port (Phase 2) is exposed |
+| TLS | Terminated at Caddy or the Hetzner LB. The API speaks plain HTTP on the internal Docker network |
+| Forwarded headers | `UseForwardedHeaders` trusting only the proxy's network, so client IP and scheme are correct for rate limiting and redirects |
+| Config | Environment variables only, e.g. `ConnectionStrings__Default`, `Auth__Authority`. No secrets in `appsettings.*.json` or image layers |
+| Health checks | Caddy active health checks (`health_uri /health/ready`) and LB health checks in Phase 2. Deploy script polls the same endpoint |
+| Graceful shutdown | .NET handles SIGTERM. Set `HostOptions.ShutdownTimeout` (e.g. 25 s) and Compose `stop_grace_period: 30s`, so in-flight requests finish during rolling restarts |
+| Resource limits | Compose `mem_limit` / `cpus` per container. .NET's GC respects cgroup limits, and DATAS (default for Server GC since .NET 9) keeps memory use proportional to load |
+| Filesystem | `read_only: true` with a `tmpfs` for `/tmp`. Uploads go to Object Storage, never to the container disk |
+| Logs | JSON to stdout. **Configure Docker log rotation** (`json-file` with `max-size`/`max-file`), or logs will eventually fill the server disk |
+| Restart policy | `restart: unless-stopped` |
+| Time zone | UTC in the container. Convert at the edges (frontend or explicit API fields) |
+
+### Images and registry
+
+- Registry: **GitHub Container Registry (GHCR)**. Free for this use, and access is tied to repo permissions.
+- Tags: immutable `:<git-sha>` for deploys, plus `:<semver>` on releases. Never deploy `:latest`.
+- OCI labels (`org.opencontainers.image.source`, `revision`) so an image can be traced back to its commit.
+- CI scans images with **Trivy** (fail on high/critical with a fix available) and produces an SBOM.
+- Renovate/Dependabot bumps the `sdk` and `aspnet` base image digests, so security patches arrive as PRs.
+
+### Migrations as a one-off container
+
+The EF Core migration bundle runs as a short-lived container before the new API version starts:
+
+```
+docker compose run --rm migrate      # exits 0 on success, deploy stops on non-zero
+docker compose up -d --no-deps api   # then rolling restart
+```
+
+This keeps migration rights (DDL) separate from the API's runtime DB user, which only needs read/write on tables.
+
+### Local development
+
+`compose.override.yml` adds Postgres, the OTel collector and optionally a local IdP, and maps the API to `localhost:5000`. Developers can still run the API with `dotnet run`/hot reload against the Compose Postgres. Both paths must work.
+
+---
+
+## 5. Data layer
 
 - **PostgreSQL 17/18** with **EF Core 10 + Npgsql**.
 - Migrations run as a **separate step in the deploy pipeline** (EF migration bundle), not on app startup. Startup migrations race when running two replicas.
@@ -171,7 +236,7 @@ Rename `Template` to the product name when the template is used.
 
 ---
 
-## 5. Hetzner infrastructure
+## 6. Hetzner infrastructure
 
 | Resource | Use |
 |---|---|
@@ -190,16 +255,16 @@ Rename `Template` to the product name when the template is used.
 
 ---
 
-## 6. CI/CD
+## 7. CI/CD
 
 ```
 PR  ──▶ ci.yml: restore → build (warnings as errors) → unit + integration tests
                 → dotnet format --verify-no-changes → docker buildx (amd64+arm64)
 
 main ─▶ deploy.yml: build & push ghcr.io/<org>/<api>:<sha>
-                  → run EF migration bundle against prod DB
                   → ssh deploy@host ./deploy.sh <sha>
                         - docker compose pull
+                        - docker compose run --rm migrate   (DB is private, so migrations run on the host)
                         - restart replica 1, wait for /health/ready
                         - restart replica 2, wait for /health/ready
                   → smoke test public /health/ready
@@ -207,11 +272,11 @@ main ─▶ deploy.yml: build & push ghcr.io/<org>/<api>:<sha>
 
 - Images are tagged by commit SHA. Rollback = redeploy the previous SHA.
 - Use GitHub Environments (`staging`, `production`) with required reviewers on production.
-- Dockerfile: multi-stage, `mcr.microsoft.com/dotnet/aspnet:10.0` (or chiseled image) runtime, non-root user, `HEALTHCHECK`.
+- Image build follows section 4 (multi-stage, chiseled, non-root). Health is verified by the deploy script and Caddy/LB, not a Docker `HEALTHCHECK`.
 
 ---
 
-## 7. Secrets
+## 8. Secrets
 
 Hetzner has no secrets manager, so:
 
@@ -221,7 +286,7 @@ Hetzner has no secrets manager, so:
 
 ---
 
-## 8. Backups and recovery
+## 9. Backups and recovery
 
 Because the database is self-managed, this section is non-negotiable.
 
@@ -233,7 +298,7 @@ Because the database is self-managed, this section is non-negotiable.
 
 ---
 
-## 9. Observability
+## 10. Observability
 
 - **OpenTelemetry** SDK in the API (traces, metrics, logs) → OTel Collector container → **Grafana Cloud** free tier (Tempo/Prometheus/Loki).
   Alternative: self-host Grafana + Prometheus + Loki on a small VM. Cheaper at scale, more to maintain.
@@ -242,7 +307,7 @@ Because the database is self-managed, this section is non-negotiable.
 
 ---
 
-## 10. Security checklist
+## 11. Security checklist
 
 - [ ] SSH keys only, root login disabled, fail2ban or SSH behind VPN
 - [ ] Cloud Firewall default deny, DB port closed publicly
@@ -256,7 +321,7 @@ Because the database is self-managed, this section is non-negotiable.
 
 ---
 
-## 11. Frontend integration (React + TanStack Query)
+## 12. Frontend integration (React + TanStack Query)
 
 - API publishes `/openapi/v1.json`.
 - Frontend generates a typed client with **orval** or **openapi-typescript** + `openapi-fetch`. Orval can emit TanStack Query v5 hooks directly.
@@ -264,7 +329,7 @@ Because the database is self-managed, this section is non-negotiable.
 
 ---
 
-## 12. Rough cost (verify on hetzner.com, prices changed in 2025)
+## 13. Rough cost (verify on hetzner.com, prices changed in 2025)
 
 | Phase | Items | Approx. monthly |
 |---|---|---|
@@ -275,7 +340,7 @@ Observability on Grafana Cloud free tier: €0 until limits are reached.
 
 ---
 
-## 13. Open questions (please challenge these)
+## 14. Open questions (please challenge these)
 
 1. **What does the API do, and what load do we expect?** Requests/sec and data size decide whether Phase 1 is enough for a long time.
 2. **Is self-managing Postgres acceptable?** If nobody wants to own backups, patching and failover, a managed EU Postgres (e.g. Scaleway, Aiven, Neon EU) next to Hetzner compute is a valid hybrid. Expect a few ms of extra latency and egress cost.
@@ -286,7 +351,7 @@ Observability on Grafana Cloud free tier: €0 until limits are reached.
 
 ---
 
-## 14. Suggested next steps
+## 15. Suggested next steps
 
 1. Agree on the open questions above and record them as ADRs in `docs/adr/`.
 2. Scaffold the solution skeleton and one sample feature (`Orders`) end to end.
