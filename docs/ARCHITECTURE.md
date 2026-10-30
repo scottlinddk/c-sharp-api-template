@@ -160,6 +160,43 @@ Rename `Template` to the product name when the template is used.
 | Time | Inject `TimeProvider`, never `DateTime.UtcNow` directly |
 | Logging | Serilog or built-in logging, structured JSON to stdout, exported via OpenTelemetry |
 | Health | `/health/live` (process up) and `/health/ready` (DB reachable). Used by Caddy/LB |
+| Correlation | `Correlation-ID` header: reused from the client if safe, otherwise the W3C trace id. Echoed on every response, in log scopes and in ProblemDetails (`correlationId`) |
+
+### REST API design conventions
+
+Based on Microsoft's [Best practices for RESTful web API design](https://learn.microsoft.com/en-us/azure/architecture/best-practices/api-design). The `Orders` feature is the reference implementation, and integration tests pin each behavior.
+
+**Adopted**
+
+| Guideline | How the template does it |
+|---|---|
+| Nouns, plural collections, max collection/item depth | `/api/v1/orders`, `/api/v1/orders/{id}`. No verbs in URIs; status changes go through PUT, not `/orders/{id}/cancel` |
+| GET | 200 with body, 404 if missing |
+| POST | To the collection only. 201 + `Location` (generated from the route, not hand-built) + body. POST to an item URI returns 405 |
+| PUT | Full replacement, **idempotent** (same request twice gives the same result). 200, 404, 409 for business-rule conflicts |
+| DELETE | 204, then 404 on repeat |
+| 400 vs 409 | 400 for invalid input (field-level `ValidationProblem`), 409 when valid input conflicts with the resource's current state |
+| Media types | JSON in and out. Non-JSON request bodies get 415 |
+| Pagination | `limit` (default 25, **max 100**, larger values are rejected with 400) and `offset` (default 0). Response: `{ items, offset, limit, totalCount }` |
+| Filtering and sorting | Query parameters (`status`, `minTotal`, `sort=-createdAt`). Sort values are allow-listed and always tie-broken by id for stable pages |
+| Versioning | URI versioning (`/api/v1`). Cache-friendly and explicit |
+| Tenant/user context | From the token (Clerk `sub`, `o.id`), never from client-supplied headers. Other users' items return 404, not 403 |
+| Distributed tracing | `Correlation-ID` header, see above |
+| Documentation | OpenAPI document + Swagger UI. Query parameter names are pinned to camelCase so generated clients match the JSON |
+
+**Deliberately not adopted (revisit when the need appears)**
+
+| Guideline | Why not now |
+|---|---|
+| HATEOAS (`links` in every response) | The guide notes there is no standard format. Typed OpenAPI clients cover discoverability for our React frontend. Richardson level 2 is the target |
+| 204 for "search with no matches" | An empty collection returns **200 with `items: []`**. Clients then handle one shape, and TanStack Query does not need a special case |
+| 406 on unsupported `Accept` | JSON is the only format. The guide allows returning the default media type instead of 406 |
+| PATCH (JSON merge patch) | PUT covers the sample's needs. Add `application/merge-patch+json` when partial updates of large resources are needed |
+| Field selection (`fields=`) | Adds a validation surface for little gain at this size |
+| Async 202 + status endpoint | No long-running operations yet |
+| Range requests / HEAD | No large binary resources |
+| Optimistic concurrency (ETag / If-Match) | Recommended next step for PUT when concurrent edits become realistic. Postgres `xmin` can serve as the version without a schema change |
+| Keyset (cursor) pagination | limit/offset is simple and fine for small collections. Switch to keyset (`?after=<id>`) for large or fast-changing collections, where deep offsets get slow |
 
 ---
 

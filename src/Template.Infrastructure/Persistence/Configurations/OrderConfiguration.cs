@@ -30,6 +30,7 @@ internal sealed class OrderConfiguration : IEntityTypeConfiguration<Order>
             .HasMaxLength(Order.CreatedByMaxLength)
             .IsRequired();
 
-        builder.HasIndex(o => o.CreatedBy);
+        // Serves "my orders, newest first": every list query filters on CreatedBy and sorts by CreatedAt.
+        builder.HasIndex(o => new { o.CreatedBy, o.CreatedAt });
     }
 }

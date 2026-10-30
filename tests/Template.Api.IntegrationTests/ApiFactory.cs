@@ -37,6 +37,7 @@ public sealed class ApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
         builder.UseSetting("OpenApi:Enabled", "true");
         builder.UseSetting("Clerk:Issuer", TestTokens.Issuer);
         builder.UseSetting("Clerk:AuthorizedParties:0", TestTokens.AllowedOrigin);
+        builder.UseSetting("Cors:AllowedOrigins:0", TestTokens.AllowedOrigin);
 
         // Trust the test signing key instead of downloading Clerk's JWKS. Everything else
         // (issuer, lifetime, algorithm, azp and sts checks) runs exactly as in production.
