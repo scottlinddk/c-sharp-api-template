@@ -20,7 +20,7 @@ public sealed class OrderEndpointsTests(ApiFactory factory)
         var created = await create.Content.ReadFromJsonAsync<OrderResponse>(ApiJson.Options, Ct);
         Assert.NotNull(created);
         Assert.Equal(OrderStatus.Pending, created.Status);
-        Assert.Equal($"/api/v1/orders/{created.Id}", create.Headers.Location?.OriginalString);
+        Assert.Equal($"/api/v1/orders/{created.Id}", create.Headers.Location?.AbsolutePath);
 
         var fetched = await _client.GetFromJsonAsync<OrderResponse>($"/api/v1/orders/{created.Id}", ApiJson.Options, Ct);
 

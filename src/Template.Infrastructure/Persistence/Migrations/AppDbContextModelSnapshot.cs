@@ -51,7 +51,7 @@ namespace Template.Infrastructure.Persistence.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("CreatedBy");
+                    b.HasIndex("CreatedBy", "CreatedAt");
 
                     b.ToTable("orders", (string)null);
                 });

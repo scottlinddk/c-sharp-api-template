@@ -15,7 +15,14 @@ builder.Services
     .AddInfrastructure();
 
 builder.Services.AddSingleton(TimeProvider.System);
-builder.Services.AddProblemDetails();
+builder.Services.AddProblemDetails(options =>
+    options.CustomizeProblemDetails = context =>
+    {
+        if (CorrelationIdMiddleware.Get(context.HttpContext) is { } correlationId)
+        {
+            context.ProblemDetails.Extensions["correlationId"] = correlationId;
+        }
+    });
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
@@ -34,6 +41,7 @@ var app = builder.Build();
 
 // TLS terminates at Caddy / the Hetzner LB, so no HTTPS redirection here.
 app.UseForwardedHeaders();
+app.UseMiddleware<CorrelationIdMiddleware>();
 app.UseExceptionHandler();
 app.UseStatusCodePages();
 app.UseCors();

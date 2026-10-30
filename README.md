@@ -43,6 +43,20 @@ docker compose run --rm --build migrate
 
 Swagger UI: <http://localhost:5080/swagger> · OpenAPI document: <http://localhost:5080/openapi/v1.json>
 
+## API conventions
+
+Follows Microsoft's [RESTful web API design best practices](https://learn.microsoft.com/en-us/azure/architecture/best-practices/api-design). Summary (details and the deliberate exceptions are in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#rest-api-design-conventions)):
+
+| Request | Success | Errors |
+|---|---|---|
+| `GET /api/v1/orders?limit=25&offset=0&status=Pending&minTotal=100&sort=-createdAt` | 200 `{ items, offset, limit, totalCount }` | 400 |
+| `POST /api/v1/orders` | 201 + `Location` + body | 400, 415 |
+| `GET /api/v1/orders/{id}` | 200 | 404 |
+| `PUT /api/v1/orders/{id}` (full replace, idempotent) | 200 | 400, 404, 409 |
+| `DELETE /api/v1/orders/{id}` | 204 | 404 |
+
+All errors are `application/problem+json` and include `correlationId`. Every response carries a `Correlation-ID` header (send your own to trace a request end to end). Browsers can read `Location` and `Correlation-ID` (exposed via CORS).
+
 ## Authentication (Clerk)
 
 The API accepts Clerk session tokens as `Authorization: Bearer <token>` and validates them with ASP.NET Core's JWT bearer handler, following [Clerk's manual verification guide](https://clerk.com/docs/guides/sessions/manual-jwt-verification). No Clerk SDK is needed.

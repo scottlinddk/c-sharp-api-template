@@ -33,7 +33,10 @@ internal static class HttpExtensions
         services.AddCors(options => options.AddDefaultPolicy(policy => policy
             .WithOrigins(origins)
             .AllowAnyHeader()
-            .AllowAnyMethod()));
+            .AllowAnyMethod()
+            // Without this, browser JavaScript cannot read these response headers
+            // (e.g. the Location of a newly created resource).
+            .WithExposedHeaders("Location", CorrelationIdMiddleware.HeaderName)));
 
         return services;
     }
