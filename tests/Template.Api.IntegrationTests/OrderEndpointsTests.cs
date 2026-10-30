@@ -8,7 +8,7 @@ namespace Template.Api.IntegrationTests;
 
 public sealed class OrderEndpointsTests(ApiFactory factory)
 {
-    private readonly HttpClient _client = factory.CreateClient();
+    private readonly HttpClient _client = factory.CreateAuthenticatedClient();
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     [Fact]
@@ -49,6 +49,18 @@ public sealed class OrderEndpointsTests(ApiFactory factory)
         var response = await _client.PostAsJsonAsync("/api/v1/orders", new { customerName = "Acme", totalAmount = "10" }, Ct);
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Get_OrderOfAnotherUser_Returns404()
+    {
+        var create = await _client.PostAsJsonAsync("/api/v1/orders", new { customerName = "Alice Corp", totalAmount = 10m }, Ct);
+        var created = await create.Content.ReadFromJsonAsync<OrderResponse>(ApiJson.Options, Ct);
+
+        var bob = factory.CreateAuthenticatedClient("user_bob");
+        var response = await bob.GetAsync($"/api/v1/orders/{created!.Id}", Ct);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
     [Fact]

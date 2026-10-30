@@ -6,9 +6,11 @@
     <!-- CS1573: injected services and CancellationToken are intentionally undocumented. -->
     <NoWarn>$(NoWarn);CS1591;CS1573</NoWarn>
     <ContainerRepository>template-api</ContainerRepository>
+    <UserSecretsId>template-api</UserSecretsId>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" />
     <PackageReference Include="Swashbuckle.AspNetCore.SwaggerUI" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design">
       <PrivateAssets>all</PrivateAssets>

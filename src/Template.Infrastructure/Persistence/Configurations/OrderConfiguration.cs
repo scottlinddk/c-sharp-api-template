@@ -25,5 +25,11 @@ internal sealed class OrderConfiguration : IEntityTypeConfiguration<Order>
             .HasMaxLength(32);
 
         builder.Property(o => o.CreatedAt);
+
+        builder.Property(o => o.CreatedBy)
+            .HasMaxLength(Order.CreatedByMaxLength)
+            .IsRequired();
+
+        builder.HasIndex(o => o.CreatedBy);
     }
 }

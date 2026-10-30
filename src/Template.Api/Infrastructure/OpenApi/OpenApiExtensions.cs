@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.OpenApi;
 
 namespace Template.Api.Infrastructure.OpenApi;
@@ -6,6 +7,7 @@ internal static class OpenApiExtensions
 {
     private const string DocumentName = "v1";
     private const string EnabledKey = "OpenApi:Enabled";
+    private const string BearerSchemeName = "Bearer";
 
     /// <summary>
     /// Generates the OpenAPI document with the built-in Microsoft.AspNetCore.OpenApi package.
@@ -25,6 +27,41 @@ internal static class OpenApiExtensions
                 };
                 return Task.CompletedTask;
             });
+
+            // Lets Swagger UI send "Authorization: Bearer <Clerk session token>" via the Authorize button.
+            options.AddDocumentTransformer((document, _, _) =>
+            {
+                document.Components ??= new OpenApiComponents();
+                document.Components.SecuritySchemes ??= new Dictionary<string, IOpenApiSecurityScheme>();
+                document.Components.SecuritySchemes[BearerSchemeName] = new OpenApiSecurityScheme
+                {
+                    Type = SecuritySchemeType.Http,
+                    Scheme = "bearer",
+                    BearerFormat = "JWT",
+                    Description = "Clerk session token. In the frontend: `await window.Clerk.session.getToken()`.",
+                };
+                return Task.CompletedTask;
+            });
+
+            // Marks every operation that is not AllowAnonymous as requiring the bearer token, and documents 401.
+            options.AddOperationTransformer((operation, context, _) =>
+            {
+                var allowsAnonymous = context.Description.ActionDescriptor.EndpointMetadata.OfType<IAllowAnonymous>().Any();
+                if (allowsAnonymous)
+                {
+                    return Task.CompletedTask;
+                }
+
+                operation.Security ??= [];
+                operation.Security.Add(new OpenApiSecurityRequirement
+                {
+                    [new OpenApiSecuritySchemeReference(BearerSchemeName, context.Document)] = [],
+                });
+
+                operation.Responses ??= [];
+                operation.Responses.TryAdd("401", new OpenApiResponse { Description = "Missing or invalid Clerk session token." });
+                return Task.CompletedTask;
+            });
         });
 
         return services;
@@ -41,7 +78,7 @@ internal static class OpenApiExtensions
             return app;
         }
 
-        app.MapOpenApi();
+        app.MapOpenApi().AllowAnonymous();
 
         app.UseSwaggerUI(options =>
         {
@@ -49,6 +86,7 @@ internal static class OpenApiExtensions
             options.RoutePrefix = "swagger";
             options.DocumentTitle = "Template API";
             options.DisplayRequestDuration();
+            options.EnablePersistAuthorization();
         });
 
         return app;

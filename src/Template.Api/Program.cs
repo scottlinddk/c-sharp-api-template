@@ -1,6 +1,7 @@
 using System.Text.Json.Serialization;
 using Template.Api.Endpoints.Health;
 using Template.Api.Endpoints.Orders;
+using Template.Api.Infrastructure.Auth;
 using Template.Api.Infrastructure.ExceptionHandling;
 using Template.Api.Infrastructure.Http;
 using Template.Api.Infrastructure.OpenApi;
@@ -27,6 +28,7 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 builder.Services.AddApiOpenApi();
 builder.Services.AddApiForwardedHeaders(builder.Configuration);
 builder.Services.AddApiCors(builder.Configuration);
+builder.Services.AddClerkAuthentication(builder.Configuration);
 
 var app = builder.Build();
 
@@ -36,7 +38,12 @@ app.UseExceptionHandler();
 app.UseStatusCodePages();
 app.UseCors();
 
+// Swagger UI is middleware, so it is registered before authentication; the API endpoints are not.
 app.MapApiOpenApi();
+
+app.UseAuthentication();
+app.UseAuthorization();
+
 app.MapHealthEndpoints();
 
 var v1 = app.MapGroup("/api/v1");

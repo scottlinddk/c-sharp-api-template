@@ -37,6 +37,8 @@ services:
       OpenApi__Enabled: ${OPENAPI_ENABLED:-false}
       ForwardedHeaders__KnownNetworks__0: 172.30.0.0/24
       Cors__AllowedOrigins__0: ${CORS_ORIGIN:-}
+      Clerk__Issuer: ${CLERK_ISSUER:?set CLERK_ISSUER}
+      Clerk__AuthorizedParties__0: ${CLERK_AUTHORIZED_PARTY:?set CLERK_AUTHORIZED_PARTY}
     read_only: true
     tmpfs:
       - /tmp
