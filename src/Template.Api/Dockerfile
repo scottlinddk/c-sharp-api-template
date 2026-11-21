@@ -3,7 +3,7 @@
 #   docker build -f src/Template.Api/Dockerfile -t template-api .                      # API image (default)
 #   docker build -f src/Template.Api/Dockerfile --target migrator -t template-migrator . # EF migration bundle
 
-ARG DOTNET_VERSION=10.0
+ARG DOTNET_VERSION=11.0
 
 # ---------- build ----------
 FROM mcr.microsoft.com/dotnet/sdk:${DOTNET_VERSION} AS build
